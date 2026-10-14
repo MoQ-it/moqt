@@ -68,7 +68,7 @@ func main() {
 	wts := &webtransport.Server{H3: h3, ApplicationProtocols: []string{v22.ALPN}, CheckOrigin: func(*http.Request) bool { return true }}
 	mux := http.NewServeMux()
 	mux.HandleFunc(*path, func(w http.ResponseWriter, req *http.Request) {
-		sess, err := wts.Upgrade(w, req)
+		sess, err := wt.Upgrade(wts, w, req)
 		if err != nil {
 			log.Warn("webtransport upgrade", "err", err)
 			w.WriteHeader(http.StatusBadRequest)

@@ -19,6 +19,7 @@ import (
 	v22 "github.com/MoQ-it/moqt/wire/v22"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/quic-go/webtransport-go"
 )
 
@@ -59,7 +60,7 @@ func TestOverWebTransport(t *testing.T) {
 	serverErr := make(chan error, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/moq", func(w http.ResponseWriter, r *http.Request) {
-		sess, err := srv.Upgrade(w, r)
+		sess, err := wt.Upgrade(srv, w, r)
 		if err != nil {
 			serverErr <- err
 			return
@@ -128,4 +129,69 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// A raw HTTP/3 client sees the session credit as separate capsules.
+func TestUpgradeGrantsCredit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"localhost"}}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	tlsConf := http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3 := &http3.Server{TLSConfig: tlsConf, QUICConfig: &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true}}
+	webtransport.ConfigureHTTP3Server(h3)
+	srv := &webtransport.Server{H3: h3, CheckOrigin: func(*http.Request) bool { return true }}
+	defer srv.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/moq", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := wt.Upgrade(srv, w, r); err != nil {
+			t.Error(err)
+		}
+	})
+	h3.Handler = mux
+	go srv.Serve(pc)
+
+	qconn, err := quic.DialAddr(ctx, pc.LocalAddr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qconn.CloseWithError(0, "")
+	cc := (&http3.Transport{EnableDatagrams: true, AdditionalSettings: map[uint64]uint64{0x2c7cf000: 1}}).NewClientConn(qconn)
+	<-cc.ReceivedSettings()
+	str, err := cc.OpenRequestStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := "https://localhost/moq"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodConnect, u, nil)
+	req.Proto = "webtransport-h3"
+	if err := str.SendRequestHeader(req); err != nil {
+		t.Fatal(err)
+	}
+	if rsp, err := str.ReadResponse(); err != nil || rsp.StatusCode != http.StatusOK {
+		t.Fatalf("response %v, %v", rsp, err)
+	}
+	want := map[http3.CapsuleType]uint64{0x190b4d3d: quicvarint.Max, 0x190b4d3f: 1 << 60, 0x190b4d40: 1 << 60}
+	p := http3.NewCapsuleParser(str)
+	for range want {
+		ct, cr, err := p.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := quicvarint.Read(cr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want[ct] != v {
+			t.Errorf("capsule 0x%x = %d, want %d", uint64(ct), v, want[ct])
+		}
+		delete(want, ct)
+	}
 }

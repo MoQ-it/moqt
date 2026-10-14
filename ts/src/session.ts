@@ -76,6 +76,8 @@ export interface ConnectOptions {
   authorizationTokenType?: number;
   setupOptions?: KeyValue[];
   handler?: Handler;
+  /** How long the WebTransport handshake may take (default 10000ms). */
+  readyTimeoutMs?: number;
   setupTimeoutMs?: number;
   /** How long a data stream with an unknown Track Alias waits (default 2000ms). */
   aliasWaitMs?: number;
@@ -206,8 +208,24 @@ export class Session {
     if (opts.serverCertificateHashes) {
       wtOpts.serverCertificateHashes = opts.serverCertificateHashes.map((value) => ({ algorithm: "sha-256", value: value as BufferSource }));
     }
+    if (typeof WebTransport === "undefined") throw new Error("this browser does not support WebTransport");
     const wt = new WebTransport(opts.url, wtOpts);
-    await wt.ready;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out opening a WebTransport session to ${opts.url}`)), opts.readyTimeoutMs ?? 10000);
+    });
+    try {
+      await Promise.race([wt.ready, expired]);
+    } catch (e) {
+      try {
+        wt.close();
+      } catch {
+        // already closed
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
     const negotiated = (wt as { protocol?: string }).protocol;
     if (negotiated !== undefined && negotiated !== "" && negotiated !== ALPN) {
       wt.close({ closeCode: SessionErrorCode.ProtocolViolation, reason: "protocol" });
@@ -227,6 +245,21 @@ export class Session {
       (info) => this.terminate(new Error(`session closed (${info.closeCode}): ${info.reason}`)),
       (e) => this.terminate(e instanceof Error ? e : new Error(String(e))),
     );
+    const timeout = setTimeout(() => {
+      this.close(SessionErrorCode.ControlMessageTimeout, "no SETUP");
+      this.rejectSetup(new Error("timed out waiting for SETUP"));
+    }, opts.setupTimeoutMs ?? 10000);
+    void this.acceptUniStreams();
+    void this.acceptRequests();
+    void this.receiveDatagrams();
+    try {
+      await Promise.all([this.sendSetup(opts), setupDone]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async sendSetup(opts: ConnectOptions) {
     this.ctrl = (await this.wt.createUnidirectionalStream()).getWriter();
     const options: KeyValue[] = [{ type: SetupOption.Implementation, bytes: encoder.encode(Implementation) }, ...(opts.setupOptions ?? [])];
     if (opts.authorizationToken) {
@@ -234,18 +267,6 @@ export class Session {
       options.push({ type: SetupOption.AuthorizationToken, bytes: token });
     }
     await this.ctrl.write(encodeMessage({ type: MsgType.Setup, options }));
-    void this.acceptUniStreams();
-    void this.acceptRequests();
-    void this.receiveDatagrams();
-    const timeout = setTimeout(() => {
-      this.close(SessionErrorCode.ControlMessageTimeout, "no SETUP");
-      this.rejectSetup(new Error("timed out waiting for SETUP"));
-    }, opts.setupTimeoutMs ?? 10000);
-    try {
-      await setupDone;
-    } finally {
-      clearTimeout(timeout);
-    }
   }
 
   close(code: number = SessionErrorCode.NoError, reason = "") {

@@ -3,10 +3,52 @@ package wt
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/MoQ-it/moqt"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/quic-go/webtransport-go"
 )
+
+// WebTransport session flow-control capsules (draft-ietf-webtrans-http3).
+const (
+	capsuleMaxData        http3.CapsuleType = 0x190b4d3d
+	capsuleMaxStreamsBidi http3.CapsuleType = 0x190b4d3f
+	capsuleMaxStreamsUni  http3.CapsuleType = 0x190b4d40
+	maxStreams                              = 1 << 60
+)
+
+// Upgrade upgrades r to a WebTransport session on srv, like srv.Upgrade.
+// When srv does not limit the session, it also grants the client unlimited
+// session credit explicitly, because some clients treat missing
+// SETTINGS_WT_INITIAL_MAX_* as zero and never open a stream.
+func Upgrade(srv *webtransport.Server, w http.ResponseWriter, r *http.Request) (*webtransport.Session, error) {
+	sess, err := srv.Upgrade(w, r)
+	if err != nil {
+		return nil, err
+	}
+	if c := srv.Config; c == nil || c.MaxIncomingStreams == 0 && c.MaxIncomingUniStreams == 0 && c.MaxIncomingData == 0 {
+		if hs, ok := w.(http3.HTTPStreamer); ok {
+			grantCredit(hs.HTTPStream())
+		}
+	}
+	return sess, nil
+}
+
+// grantCredit sends each capsule in its own DATA frame: some clients act
+// only on the first capsule of a frame. Writes never block session setup.
+func grantCredit(str *http3.Stream) {
+	for _, c := range []struct {
+		t http3.CapsuleType
+		v uint64
+	}{{capsuleMaxData, quicvarint.Max}, {capsuleMaxStreamsBidi, maxStreams}, {capsuleMaxStreamsUni, maxStreams}} {
+		v := quicvarint.Append(nil, c.v)
+		b := quicvarint.Append(nil, uint64(c.t))
+		b = quicvarint.Append(b, uint64(len(v)))
+		_ = str.TryWriteAll(append(b, v...))
+	}
+}
 
 // Conn adapts a *webtransport.Session to moqt.Conn.
 type Conn struct {
