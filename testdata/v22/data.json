@@ -1,0 +1,22 @@
+{
+  "_comment": "Hand-encoded draft-22 data-plane vectors, shared by the Go and TS tests.",
+  "subgroupStreams": [
+    {
+      "name": "alias 1, group 5, subgroup 0, priority 16; objects 0 'a', 1 'bc', 3 End of Group",
+      "hex": "1001051000016100026263010003",
+      "breakdown": "10 type (bit4, explicit priority, subgroup 0) | 01 alias | 05 group | 10 priority | 00 01 'a' | 00 02 'bc' | 01 00 03 (delta 1 -> id 3, len 0, status EndOfGroup)"
+    }
+  ],
+  "datagrams": [
+    {
+      "name": "alias 2, group 7, object 0, default priority, payload 'hi'",
+      "hex": "0c02076869",
+      "breakdown": "0c flags ZERO_OBJECT_ID|DEFAULT_PRIORITY | 02 alias | 07 group | 'hi'"
+    },
+    {
+      "name": "alias 2, group 7, object 4, priority 32, End of Group status",
+      "hex": "200207042003",
+      "breakdown": "20 flags STATUS | 02 alias | 07 group | 04 object | 20 priority | 03 status"
+    }
+  ]
+}

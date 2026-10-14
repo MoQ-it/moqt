@@ -1,0 +1,178 @@
+{
+  "_comment": "Golden vectors for draft-ietf-moq-transport-22 primitives, shared by the Go and TS implementations. Values are decimal strings to survive JSON number limits. 'minimal: false' vectors are decode-only.",
+  "varints": [
+    {
+      "hex": "25",
+      "value": "37",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "8025",
+      "value": "37",
+      "minimal": false,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "bbbd",
+      "value": "15293",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "ed7f3e7d",
+      "value": "226442877",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "faa1a0e403d8",
+      "value": "2893212287960",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "fc8998abc66bc0",
+      "value": "151288809941952",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "fefa318fa8e3ca11",
+      "value": "70423237261249041",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "ffffffffffffffffff",
+      "value": "18446744073709551615",
+      "minimal": true,
+      "source": "spec Table 4"
+    },
+    {
+      "hex": "00",
+      "value": "0",
+      "minimal": true,
+      "source": "spec 8.1"
+    },
+    {
+      "hex": "8000",
+      "value": "0",
+      "minimal": false,
+      "source": "spec 8.1"
+    },
+    {
+      "hex": "c00000",
+      "value": "0",
+      "minimal": false,
+      "source": "spec 8.1"
+    },
+    {
+      "hex": "7f",
+      "value": "127",
+      "minimal": true,
+      "source": "boundary"
+    },
+    {
+      "hex": "8080",
+      "value": "128",
+      "minimal": true,
+      "source": "boundary"
+    },
+    {
+      "hex": "bfff",
+      "value": "16383",
+      "minimal": true,
+      "source": "boundary"
+    },
+    {
+      "hex": "c04000",
+      "value": "16384",
+      "minimal": true,
+      "source": "boundary"
+    },
+    {
+      "hex": "feffffffffffffff",
+      "value": "72057594037927935",
+      "minimal": true,
+      "source": "boundary"
+    },
+    {
+      "hex": "ff0100000000000000",
+      "value": "72057594037927936",
+      "minimal": true,
+      "source": "boundary"
+    }
+  ],
+  "keyValues": [
+    {
+      "_comment": "types 2(int 5), 3(\"ab\"), 3(\"c\"), 16(int 300): deltas 2,1,0,13",
+      "hex": "0205010261620001630d812c",
+      "pairs": [
+        {
+          "type": "2",
+          "int": "5"
+        },
+        {
+          "type": "3",
+          "bytesHex": "6162"
+        },
+        {
+          "type": "3",
+          "bytesHex": "63"
+        },
+        {
+          "type": "16",
+          "int": "300"
+        }
+      ]
+    }
+  ],
+  "namespaces": [
+    {
+      "hex": "02056d6f716974027231",
+      "fields": [
+        "moqit",
+        "r1"
+      ],
+      "rendered": "moqit-r1"
+    }
+  ],
+  "renderedNames": [
+    {
+      "namespace": [
+        "example.net",
+        "team2",
+        "project_x"
+      ],
+      "track": "report",
+      "rendered": "example.2enet-team2-project_x--report",
+      "source": "spec 8.8"
+    }
+  ],
+  "tokens": [
+    {
+      "hex": "0101006a7774",
+      "aliasType": 1,
+      "alias": "1",
+      "type": "0",
+      "valueHex": "6a7774"
+    },
+    {
+      "hex": "03076a7774",
+      "aliasType": 3,
+      "type": "7",
+      "valueHex": "6a7774"
+    },
+    {
+      "hex": "0205",
+      "aliasType": 2,
+      "alias": "5"
+    },
+    {
+      "hex": "0005",
+      "aliasType": 0,
+      "alias": "5"
+    }
+  ]
+}

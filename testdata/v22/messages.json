@@ -1,0 +1,15 @@
+{
+  "_comment": "Hand-encoded control messages for draft-22 (type varint, 16-bit length, body). Shared by the Go and TS tests.",
+  "messages": [
+    {
+      "name": "SUBSCRIBE moqit/r1 mic, priority 16, next-object filter",
+      "hex": "0300140002056d6f716974027231036d69630220100105",
+      "breakdown": "03 type | 0014 len | 00 req id | 02 05'moqit' 02'r1' ns | 03'mic' | 02 params | 20 10 SUBSCRIBER_PRIORITY=16 | 01 05 LOCATION_FILTER(delta 1)=NextObject"
+    },
+    {
+      "name": "SETUP with PATH=/moq and MOQT_IMPLEMENTATION=moqt-go",
+      "hex": "af00000f01042f6d6f7106076d6f71742d676f",
+      "breakdown": "af00 type 0x2F00 (2-byte varint) | 000f len | 01 04'/moq' PATH | 06 07'moqt-go' IMPLEMENTATION (delta 6)"
+    }
+  ]
+}
