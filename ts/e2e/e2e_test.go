@@ -46,6 +46,7 @@ type browserResult struct {
 		Group   uint64   `json:"group"`
 		Objects []string `json:"objects"`
 	} `json:"received"`
+	Fetched []string `json:"fetched"`
 }
 
 func TestChrome(t *testing.T) {
@@ -192,6 +193,9 @@ func run(t *testing.T, browser func(url, dir string) *exec.Cmd) {
 			}
 		}
 		t.Logf("browser received groups %d..%d, e.g. %v", res.Received[0].Group, res.Received[2].Group, res.Received[2].Objects)
+		if got := fmt.Sprint(res.Fetched); got != wantFetched {
+			t.Errorf("browser fetched %s\nwant %s", got, wantFetched)
+		}
 	case <-ctx.Done():
 		t.Fatal("no result from the browser")
 	}
@@ -222,6 +226,49 @@ func (clockPublisher) HandleSubscribe(r *moqt.SubscribeRequest) {
 	}
 }
 
+// historyArchive serves e2e/go/history to FETCH: groups 1<<33+10..12 of
+// 3 objects, with a Non-Existent range in between.
+type historyArchive struct{}
+
+const wantFetched = "[8589934602/0:a ts=7 8589934602/1:b 8589934602/2:c range 8589934603/2 8589934604/0:a 8589934604/1:b 8589934604/2:c]"
+
+func (historyArchive) Fetch(_ context.Context, _ *relay.Peer, track v22.FullTrackName, _ *v22.Params) (relay.FetchSource, bool, error) {
+	if track.Name != "history" {
+		return nil, false, nil
+	}
+	var entries []*v22.FetchObject
+	for _, g := range []uint64{1<<33 + 10, 1<<33 + 12} {
+		for o, p := range []string{"a", "b", "c"} {
+			e := &v22.FetchObject{Group: g, Object: uint64(o), SubgroupID: 0, Priority: 5, Payload: []byte(p)}
+			if g == 1<<33+10 && o == 0 {
+				e.Properties = v22.KeyValues{{Type: 0x10, Int: 7}}
+			}
+			entries = append(entries, e)
+		}
+		if g == 1<<33+10 {
+			entries = append(entries, &v22.FetchObject{Range: v22.FetchRangeNonExistent, Group: g + 1, Object: 2})
+		}
+	}
+	return &historySource{entries: entries}, true, nil
+}
+
+type historySource struct{ entries []*v22.FetchObject }
+
+func (h *historySource) Options() moqt.FetchAcceptOptions {
+	return moqt.FetchAcceptOptions{EndLocation: v22.Location{Group: 1<<33 + 12, Object: 2}}
+}
+
+func (h *historySource) Next(context.Context) (*v22.FetchObject, error) {
+	if len(h.entries) == 0 {
+		return nil, io.EOF
+	}
+	e := h.entries[0]
+	h.entries = h.entries[1:]
+	return e, nil
+}
+
+func (h *historySource) Close() {}
+
 func selfSigned(t *testing.T) (tls.Certificate, string) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	// serverCertificateHashes requires ECDSA, under 14 days of validity, and
@@ -244,7 +291,7 @@ func selfSigned(t *testing.T) (tls.Certificate, string) {
 func startRelay(t *testing.T, cert tls.Certificate) string {
 	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{v22.ALPN, http3.NextProtoH3}}
 	qconf := &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, MaxIncomingStreams: 1000, MaxIncomingUniStreams: 1000}
-	r := relay.New(relay.Config{})
+	r := relay.New(relay.Config{Archive: historyArchive{}})
 	serve := func(c moqt.Conn) {
 		peer := r.NewPeer(nil)
 		s, err := moqt.NewSession(context.Background(), c, moqt.Server, moqt.Config{Handler: peer})

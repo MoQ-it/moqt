@@ -87,6 +87,7 @@ type Session struct {
 	peerIDs   idSet
 	subs      map[uint64]*Subscription // by Track Alias
 	aliasWait map[uint64]chan struct{}
+	fetches   map[uint64]*IncomingFetch // by Request ID
 	goaway    *v22.Goaway
 	goawayCh  chan struct{}
 	closeOnce sync.Once
@@ -116,6 +117,7 @@ func NewSession(ctx context.Context, conn Conn, role Role, cfg Config) (*Session
 		ready:       make(chan struct{}),
 		subs:        map[uint64]*Subscription{},
 		aliasWait:   map[uint64]chan struct{}{},
+		fetches:     map[uint64]*IncomingFetch{},
 		goawayCh:    make(chan struct{}),
 	}
 	s.ctx, s.cancel = context.WithCancelCause(conn.Context())
@@ -279,9 +281,12 @@ func (s *Session) handleUniStream(str ReceiveStream) {
 		}
 		s.handleSubgroupStream(str, br, typ)
 	case typ == v22.StreamTypeFetch:
-		// FETCH is not implemented yet; this session never sends one, so
-		// no fetch stream is expected.
-		str.CancelRead(uint64(v22.ResetCancelled))
+		select {
+		case <-s.ready:
+		case <-s.ctx.Done():
+			return
+		}
+		s.handleFetchStream(str, br)
 	case typ == v22.StreamTypePadding:
 		io.Copy(io.Discard, br)
 	default:
@@ -401,6 +406,13 @@ func (s *Session) handleRequestStream(str Stream) {
 		s.cfg.Handler.HandlePublishNamespace(&PublishNamespaceRequest{RequestID: m.RequestID, Prefix: m.Prefix, Params: m.Params, rs: rs})
 	case *v22.SubscribeNamespace:
 		s.cfg.Handler.HandleSubscribeNamespace(&SubscribeNamespaceRequest{RequestID: m.RequestID, Prefix: m.Prefix, Params: m.Params, rs: rs})
+	case *v22.Fetch:
+		h, ok := s.cfg.Handler.(FetchHandler)
+		if !ok {
+			rs.reject(v22.ReqErrNotSupported, "not implemented")
+			return
+		}
+		h.HandleFetch(&FetchRequest{RequestID: m.RequestID, Track: m.Track, Params: m.Params, s: s, rs: rs})
 	default:
 		rs.reject(v22.ReqErrNotSupported, "not implemented")
 	}

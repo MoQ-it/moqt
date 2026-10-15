@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoQ-it/moqt"
@@ -41,6 +42,11 @@ type Config struct {
 	// is forwarded (e.g. to read an audio level property). It must not
 	// block or modify the Object.
 	ObjectHook func(track v22.FullTrackName, group uint64, o *v22.Object)
+	// Archive, if set, serves FETCH from stored history.
+	Archive Archive
+	// FetchLimit, if set, caps the FETCHes a peer may have open at once;
+	// 0 means no cap. More are rejected with EXCESSIVE_LOAD.
+	FetchLimit func(p *Peer) int
 	// NamespaceHook, if set, is told when a peer's PUBLISH_NAMESPACE is
 	// accepted (active) and when it ends.
 	NamespaceHook func(p *Peer, prefix v22.Namespace, active bool)
@@ -101,6 +107,7 @@ type Peer struct {
 	r        *Relay
 	attached chan struct{}
 	sess     *moqt.Session
+	fetches  atomic.Int32
 }
 
 // NewPeer returns a handler for a new session.
@@ -285,7 +292,7 @@ func (p *Peer) HandleSubscribe(req *moqt.SubscribeRequest) {
 	// A track can close (idle linger, upstream end) between lookup and
 	// accept; then retry once with a fresh upstream subscription.
 	for range 2 {
-		t, err := r.track(req.Track, req.Params)
+		t, err := r.track(req.Track, req.Params, nil)
 		if err != nil {
 			code, reason := v22.ReqErrInternal, err.Error()
 			var re *moqt.RequestError
@@ -303,18 +310,29 @@ func (p *Peer) HandleSubscribe(req *moqt.SubscribeRequest) {
 }
 
 // track returns the relay's state for a track, establishing the upstream
-// subscription on first use.
-func (r *Relay) track(name v22.FullTrackName, params *v22.Params) (*track, error) {
+// subscription on first use. attach, if set, runs on the track under its
+// lock before any Object can arrive, unless the track has closed.
+func (r *Relay) track(name v22.FullTrackName, params *v22.Params, attach func(*track)) (*track, error) {
 	key := name.Key()
 	r.mu.Lock()
 	t := r.tracks[key]
 	if t == nil {
 		t = newTrack(r, name)
+		if attach != nil {
+			attach(t)
+		}
 		r.tracks[key] = t
 		r.mu.Unlock()
 		go t.establish(params)
 	} else {
 		r.mu.Unlock()
+		if attach != nil {
+			t.mu.Lock()
+			if !t.closed {
+				attach(t)
+			}
+			t.mu.Unlock()
+		}
 		if params != nil && params.NewGroupRequest != nil {
 			defer t.newGroupRequest(*params.NewGroupRequest)
 		}

@@ -48,6 +48,18 @@ async function main() {
     result.received = groups;
     sub.unsubscribe();
 
+    const f = await s.fetch({ namespace: ["e2e", "go"], name: "history" }, { locationFilter: { type: 4, startGroup: 2 ** 33 + 10, startObject: 0, endGroupDelta: 2, endObject: 0 } });
+    if (f.endLocation.group !== 2 ** 33 + 12) throw new Error(`fetch end ${JSON.stringify(f.endLocation)}`);
+    const fetched: string[] = [];
+    for await (const o of f) {
+      if (o.range) fetched.push(`range ${o.group}/${o.object}`);
+      else {
+        const ts = o.properties?.find((p) => p.type === 0x10)?.int;
+        fetched.push(`${o.group}/${o.object}:${dec.decode(o.payload)}${ts === undefined ? "" : ` ts=${ts}`}`);
+      }
+    }
+    result.fetched = fetched;
+
     await publishedDone;
     await fetch("/go-done"); // wait until the Go subscriber has everything
     s.close();

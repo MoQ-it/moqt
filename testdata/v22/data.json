@@ -18,5 +18,12 @@
       "hex": "200207042003",
       "breakdown": "20 flags STATUS | 02 alias | 07 group | 04 object | 20 priority | 03 status"
     }
+  ],
+  "fetchStreams": [
+    {
+      "name": "request 3, ascending; g5 o0 'a' (subgroup 0, priority 16), g5 o1 'bc', Non-Existent range to g7 o0, g8 o2 'z' (subgroup 1), g8 o3 datagram priority 32 empty",
+      "hex": "05031c050010016100026263808c07000e0002017a502000",
+      "breakdown": "05 type FETCH_HEADER | 03 request ID | 1c flags GROUP|OBJECT|PRIORITY, subgroup zero; 05 group 00 object 10 priority 01 'a' | 00 flags (same group, next object, prior priority) 02 'bc' | 80 8c Non-Existent range (2-byte varint 0x8c) 07 group 00 object (absolute) | 0e flags GROUP|OBJECT, subgroup next (1); 00 group delta (7+0+1=8) 02 object 01 'z' | 50 flags DATAGRAM|PRIORITY; 20 priority 00 empty payload"
+    }
   ]
 }

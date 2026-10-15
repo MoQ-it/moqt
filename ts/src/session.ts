@@ -1,7 +1,7 @@
 // A MOQT session over the browser WebTransport API, mirroring the Go
 // moqt package.
 
-import { EndOfStream, readSubgroupHeader, StreamReader, SubgroupDecoder } from "./stream.ts";
+import { EndOfStream, FetchDecoder, type FetchObject, readSubgroupHeader, StreamReader, SubgroupDecoder } from "./stream.ts";
 import {
   ALPN,
   AliasType,
@@ -184,6 +184,7 @@ export class Session {
   private nextTrackAlias = 0;
   private peerIds = new Set<number>();
   private subs = new Map<number, Subscription>();
+  private fetches = new Map<number, Fetch>();
   private aliasWaiters = new Map<number, (() => void)[]>();
   private gotControl = false;
   private resolveGoaway!: (g: { newSessionUri: string; timeout: number }) => void;
@@ -293,6 +294,7 @@ export class Session {
     this.ended = true;
     this.rejectSetup?.(err);
     for (const sub of this.subs.values()) sub.finish(undefined, err);
+    for (const f of this.fetches.values()) f.finish(err);
     this.resolveClosed(err);
   }
 
@@ -328,7 +330,9 @@ export class Session {
       return;
     }
     if (type === StreamType.Fetch) {
-      await r.cancel(streamError(ResetCode.Cancelled));
+      const f = this.fetches.get(await r.varint());
+      if (f) f.deliver(r);
+      else await r.cancel(streamError(ResetCode.Cancelled));
       return;
     }
     this.fail(protocolViolation(`unknown stream type 0x${type.toString(16)}`));
@@ -485,6 +489,35 @@ export class Session {
     return sub;
   }
 
+  /** Requests already-published Objects (typically by a LOCATION_FILTER) and waits for FETCH_OK. */
+  async fetch(track: FullTrackName, params: Params = {}): Promise<Fetch> {
+    let f: Fetch | undefined;
+    try {
+      const [rs, ok] = await this.openRequest((requestId) => {
+        // Registered before FETCH is sent, so its data stream always finds it.
+        f = new Fetch(this, track, requestId);
+        this.fetches.set(requestId, f);
+        return { type: MsgType.Fetch, requestId, track, params };
+      });
+      if (ok.type !== MsgType.FetchOk) {
+        const err = protocolViolation(`unexpected 0x${ok.type.toString(16)} answering FETCH`);
+        this.fail(err);
+        throw err;
+      }
+      const info = parseTrackInfo(ok.trackProperties);
+      f!.accepted(rs, ok.endOfTrack, ok.endLocation, ok.trackProperties, (params.groupOrder ?? info.groupOrder) === 2);
+      return f!;
+    } catch (e) {
+      f?.finish(e instanceof Error ? e : new Error(String(e)));
+      throw e;
+    }
+  }
+
+  /** @internal */
+  forgetFetch(id: number, f: Fetch) {
+    if (this.fetches.get(id) === f) this.fetches.delete(id);
+  }
+
   /** Advertises that this endpoint publishes tracks under prefix. */
   async publishNamespace(prefix: Namespace, params: Params = {}): Promise<PublishedNamespace> {
     validateNamespace(prefix);
@@ -558,6 +591,97 @@ export class IncomingSubgroup {
   /** STOP_SENDING: no longer interested in this subgroup. */
   cancel() {
     void this.reader.cancel(streamError(ResetCode.Cancelled));
+  }
+}
+
+/** The requester's side of an accepted FETCH. */
+export class Fetch {
+  endOfTrack = false;
+  /** The largest Location the fetch covers. */
+  endLocation: Location = { group: 0, object: 0 };
+  properties: KeyValue[] = [];
+  private rs?: RequestStream;
+  private descending = false;
+  private reader?: StreamReader;
+  private decoder?: FetchDecoder;
+  private streamWaiter?: (r: StreamReader | undefined) => void;
+  private ended?: Error | null; // null: complete
+
+  constructor(
+    private session: Session,
+    readonly track: FullTrackName,
+    readonly requestId: number,
+  ) {}
+
+  /** @internal */
+  accepted(rs: RequestStream, endOfTrack: boolean, endLocation: Location, properties: KeyValue[], descending: boolean) {
+    this.rs = rs;
+    this.endOfTrack = endOfTrack;
+    this.endLocation = endLocation;
+    this.properties = properties;
+    this.descending = descending;
+    void (async () => {
+      try {
+        while (await rs.recv());
+      } catch {
+        // cancelled
+      }
+    })();
+  }
+
+  /** @internal */
+  deliver(r: StreamReader) {
+    if (this.reader || this.ended !== undefined) {
+      void r.cancel(streamError(ResetCode.Cancelled));
+      return;
+    }
+    this.reader = r;
+    this.streamWaiter?.(r);
+  }
+
+  /** @internal */
+  finish(err: Error | null) {
+    if (this.ended !== undefined) return;
+    this.ended = err;
+    this.streamWaiter?.(undefined);
+    this.session.forgetFetch(this.requestId, this);
+  }
+
+  /** The next Object or End of Range marker, or undefined once the fetch is complete. */
+  async next(): Promise<FetchObject | undefined> {
+    if (this.ended === null) return undefined;
+    if (this.ended) throw this.ended;
+    if (!this.reader) {
+      await new Promise<StreamReader | undefined>((r) => (this.streamWaiter = r));
+      if (this.ended === null) return undefined;
+      if (this.ended) throw this.ended;
+    }
+    this.decoder ??= new FetchDecoder(this.reader!, this.descending);
+    let o: FetchObject | undefined;
+    try {
+      o = await this.decoder.next();
+    } catch (e) {
+      if (e instanceof SessionError) this.session.fail(e);
+      this.finish(e instanceof Error ? e : new Error(String(e)));
+      throw this.ended;
+    }
+    if (!o) {
+      this.rs?.finish();
+      this.finish(null);
+    }
+    return o;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<FetchObject> {
+    for (let o = await this.next(); o; o = await this.next()) yield o;
+  }
+
+  /** Abandons the fetch; does nothing once it is complete. */
+  cancel() {
+    if (this.ended === null) return;
+    this.finish(new Error("fetch cancelled"));
+    this.rs?.cancel();
+    void this.reader?.cancel(streamError(ResetCode.Cancelled));
   }
 }
 

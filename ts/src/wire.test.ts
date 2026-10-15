@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { readSubgroupHeader, StreamReader, SubgroupDecoder } from "./stream.ts";
+import { FetchDecoder, FetchRange, readSubgroupHeader, StreamReader, SubgroupDecoder } from "./stream.ts";
 import {
   decodeMessage,
   decodeToken,
@@ -151,6 +151,25 @@ describe("data plane", () => {
     const h: SubgroupHeader = { trackAlias: 1, group: 1, idMode: 0, subgroupId: 0, properties: false, endOfGroup: false, firstObject: false };
     const b = new SubgroupEncoder(h).encode({ id: 0, status: 0, payload: new Uint8Array(5) }).finish();
     await expect(new SubgroupDecoder(streamOf(b.slice(0, -2)), h).next()).rejects.toThrow(/inside an object/);
+  });
+
+  test("fetch stream", async () => {
+    const te = new TextEncoder();
+    const o = { range: 0, datagram: false, subgroupId: 0, properties: undefined };
+    const want = [
+      { ...o, group: 5, object: 0, priority: 16, payload: te.encode("a") },
+      { ...o, group: 5, object: 1, priority: 16, payload: te.encode("bc") },
+      { range: FetchRange.NonExistent, group: 7, object: 0, datagram: false, subgroupId: 0, priority: 0, payload: new Uint8Array() },
+      { ...o, group: 8, object: 2, subgroupId: 1, priority: 16, payload: te.encode("z") },
+      { ...o, group: 8, object: 3, datagram: true, subgroupId: 0, priority: 32, payload: new Uint8Array() },
+    ];
+    const r = streamOf(unhex(data.fetchStreams[0].hex));
+    expect(await r.varint()).toBe(0x05);
+    expect(await r.varint()).toBe(3);
+    const dec = new FetchDecoder(r);
+    for (const w of want) expect(await dec.next()).toEqual(w);
+    expect(await dec.next()).toBeUndefined();
+    await expect(new FetchDecoder(streamOf(new Uint8Array([0x00, 0x01, 0x61]))).next()).rejects.toThrow(/first fetch entry/);
   });
 
   test("datagrams", () => {

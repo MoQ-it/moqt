@@ -27,6 +27,7 @@ type track struct {
 	groups         []*group // ascending by ID, at most Config.CachedGroups
 	largest        *v22.Location
 	subs           map[*downstream]struct{}
+	recs           map[*recording]struct{}
 	pending        int // subscribers being accepted
 	linger         *time.Timer
 	closed         bool
@@ -41,7 +42,7 @@ type track struct {
 }
 
 func newTrack(r *Relay, name v22.FullTrackName) *track {
-	return &track{r: r, name: name, ready: make(chan struct{}), subs: map[*downstream]struct{}{}, liveChanged: make(chan struct{})}
+	return &track{r: r, name: name, ready: make(chan struct{}), subs: map[*downstream]struct{}{}, recs: map[*recording]struct{}{}, liveChanged: make(chan struct{})}
 }
 
 // establish subscribes upstream. The relay asks for the current Group
@@ -116,6 +117,7 @@ func (t *track) pumpObjects(g *moqt.IncomingSubgroup, sg *subgroup) {
 		}
 		t.observe(sg.group, o.ID)
 		sg.append(o)
+		t.record(sg, o)
 	}
 }
 
@@ -262,7 +264,7 @@ func (t *track) removeSubscriber(s *downstream) {
 func (t *track) maybeLinger() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed || len(t.subs) > 0 || t.pending > 0 || t.linger != nil {
+	if t.closed || len(t.subs) > 0 || len(t.recs) > 0 || t.pending > 0 || t.linger != nil {
 		return
 	}
 	t.linger = time.AfterFunc(t.r.cfg.Linger, t.idleClose)
@@ -271,7 +273,7 @@ func (t *track) maybeLinger() {
 func (t *track) idleClose() {
 	t.r.mu.Lock()
 	t.mu.Lock()
-	if len(t.subs) > 0 || t.pending > 0 || t.closed {
+	if len(t.subs) > 0 || len(t.recs) > 0 || t.pending > 0 || t.closed {
 		t.mu.Unlock()
 		t.r.mu.Unlock()
 		return
@@ -290,12 +292,15 @@ func (t *track) idleClose() {
 func (t *track) end(code v22.PublishDoneCode, reason string) {
 	t.mu.Lock()
 	t.closed = true
-	subs := t.subs
-	t.subs = map[*downstream]struct{}{}
+	subs, recs := t.subs, t.recs
+	t.subs, t.recs = map[*downstream]struct{}{}, map[*recording]struct{}{}
 	t.mu.Unlock()
 	t.r.removeTrack(t)
 	for s := range subs {
 		s.finish(code, reason)
+	}
+	for rec := range recs {
+		rec.end()
 	}
 }
 

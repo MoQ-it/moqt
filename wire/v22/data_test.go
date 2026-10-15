@@ -15,6 +15,7 @@ import (
 type dataGolden struct {
 	SubgroupStreams []struct{ Name, Hex string } `json:"subgroupStreams"`
 	Datagrams       []struct{ Name, Hex string } `json:"datagrams"`
+	FetchStreams    []struct{ Name, Hex string } `json:"fetchStreams"`
 }
 
 func loadDataGolden(t *testing.T) dataGolden {
@@ -64,6 +65,46 @@ func TestSubgroupGolden(t *testing.T) {
 		}
 	}
 	if _, err := sr.Next(); err != io.EOF {
+		t.Fatalf("end of stream: %v; want io.EOF", err)
+	}
+}
+
+func TestFetchGolden(t *testing.T) {
+	g := loadDataGolden(t)
+	entries := []*FetchObject{
+		{Group: 5, Object: 0, Priority: 16, Payload: []byte("a")},
+		{Group: 5, Object: 1, Priority: 16, Payload: []byte("bc")},
+		{Range: FetchRangeNonExistent, Group: 7, Object: 0},
+		{Group: 8, Object: 2, SubgroupID: 1, Priority: 16, Payload: []byte("z")},
+		{Group: 8, Object: 3, Datagram: true, Priority: 32},
+	}
+	w := NewFetchWriter(GroupOrderAscending)
+	b := FetchHeader{RequestID: 3}.Append(nil)
+	for _, o := range entries {
+		var err error
+		if b, err = w.Append(b, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := hex.EncodeToString(b); got != g.FetchStreams[0].Hex {
+		t.Fatalf("encoded %s\nwant    %s", got, g.FetchStreams[0].Hex)
+	}
+
+	r := bufio.NewReader(bytes.NewReader(mustHex(t, g.FetchStreams[0].Hex)))
+	if typ, err := ReadVarint(r); err != nil || typ != StreamTypeFetch {
+		t.Fatalf("stream type %x, %v", typ, err)
+	}
+	if id, err := ReadVarint(r); err != nil || id != 3 {
+		t.Fatalf("request ID %d, %v", id, err)
+	}
+	fr := NewFetchReader(r, GroupOrderAscending)
+	for _, want := range entries {
+		got, err := fr.Next()
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("entry %+v, %v; want %+v", got, err, want)
+		}
+	}
+	if _, err := fr.Next(); err != io.EOF {
 		t.Fatalf("end of stream: %v; want io.EOF", err)
 	}
 }

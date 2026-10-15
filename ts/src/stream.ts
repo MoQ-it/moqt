@@ -163,3 +163,112 @@ export class SubgroupDecoder {
     }
   }
 }
+
+/** End of Range kinds on a fetch stream (Table 8); 0 is an Object. */
+export const FetchRange = { Object: 0, NonExistent: 0x8c, Unknown: 0x10c, TimedOut: 0x20c } as const;
+
+/** One fetch stream entry: an Object, or an End of Range marker when range is set. */
+export interface FetchObject {
+  range: number;
+  group: number;
+  object: number;
+  /** The Object was sent as a datagram and has no Subgroup. */
+  datagram: boolean;
+  subgroupId: number;
+  priority: number;
+  properties?: KeyValue[];
+  payload: Uint8Array;
+}
+
+/** Decodes the entries after a FETCH_HEADER (Section 11.4.1). */
+export class FetchDecoder {
+  private started = false;
+  private haveObject = false;
+  private group = 0;
+  private obj = 0;
+  private subgroup = 0;
+  private priority = 0;
+  constructor(
+    private r: StreamReader,
+    private descending = false,
+  ) {}
+
+  /** The next entry, or undefined at the clean end of the stream. */
+  async next(): Promise<FetchObject | undefined> {
+    if (await this.r.done()) return undefined;
+    try {
+      return await this.entry();
+    } catch (e) {
+      if (e instanceof EndOfStream) throw protocolViolation("stream ended inside an object");
+      throw e;
+    }
+  }
+
+  private async entry(): Promise<FetchObject> {
+    const r = this.r;
+    const flags = await r.varint();
+    if (flags >= 0x80) {
+      if (flags !== FetchRange.NonExistent && flags !== FetchRange.Unknown && flags !== FetchRange.TimedOut) {
+        throw protocolViolation(`fetch serialization flags 0x${flags.toString(16)}`);
+      }
+      // Absolute Group and Object IDs, as in the Go implementation.
+      const group = await r.varint();
+      const object = await r.varint();
+      this.started = true;
+      this.group = group;
+      this.obj = object;
+      return { range: flags, group, object, datagram: false, subgroupId: 0, priority: 0, payload: new Uint8Array() };
+    }
+    if (!this.started && (flags & 0x0c) !== 0x0c) throw protocolViolation("first fetch entry must carry group and object");
+    let group = this.group;
+    let object: number;
+    if (flags & 0x08) {
+      const delta = await r.varint();
+      if (!this.started) group = delta;
+      else if (this.descending) {
+        if (delta >= this.group) throw protocolViolation("fetch group underflow");
+        group = this.group - delta - 1;
+      } else group = this.group + delta + 1;
+    }
+    const datagram = (flags & 0x40) !== 0;
+    let subgroupId = 0;
+    if (!datagram) {
+      switch (flags & 0x03) {
+        case 0x01:
+        case 0x02:
+          if (!this.haveObject) throw protocolViolation("fetch entry references a prior subgroup that does not exist");
+          subgroupId = this.subgroup + (flags & 0x03) - 1;
+          break;
+        case 0x03:
+          subgroupId = await r.varint();
+          break;
+      }
+    }
+    if (flags & 0x04) {
+      const delta = await r.varint();
+      object = !this.started || flags & 0x08 ? delta : this.obj + delta;
+    } else object = this.obj + 1;
+    this.started = true;
+    this.group = group;
+    this.obj = object;
+    let priority: number;
+    if (flags & 0x10) priority = await r.u8();
+    else {
+      if (!this.haveObject) throw protocolViolation("fetch entry references a prior priority that does not exist");
+      priority = this.priority;
+    }
+    let properties: KeyValue[] | undefined;
+    if (flags & 0x20) {
+      const n = await r.varint();
+      if (n > MaxObjectProperties) throw protocolViolation(`object properties of ${n} bytes`);
+      properties = readKeyValues(new Reader(await r.exact(n)));
+    }
+    const len = await r.varint();
+    if (len > MaxObjectPayload) throw protocolViolation(`object payload of ${len} bytes`);
+    const payload = len > 0 ? await r.exact(len) : new Uint8Array();
+    this.haveObject = true;
+    this.priority = priority;
+    if (!datagram) this.subgroup = subgroupId;
+    return { range: FetchRange.Object, group, object, datagram, subgroupId, priority, properties, payload };
+  }
+}
