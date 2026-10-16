@@ -22,9 +22,18 @@ export class StreamReader {
   private buf = new Uint8Array(0);
   private off = 0;
   private eof = false;
+  private ended = false;
+  /** @internal Called once the stream has ended: FIN read, reset, or cancelled. */
+  onEnd?: () => void;
 
   constructor(stream: ReadableStream<Uint8Array>) {
     this.reader = stream.getReader();
+  }
+
+  private end() {
+    if (this.ended) return;
+    this.ended = true;
+    this.onEnd?.();
   }
 
   private get buffered(): number {
@@ -35,9 +44,17 @@ export class StreamReader {
   private async fill(n: number): Promise<boolean> {
     while (this.buffered < n) {
       if (this.eof) return false;
-      const { value, done } = await this.reader.read();
+      let r: ReadableStreamReadResult<Uint8Array>;
+      try {
+        r = await this.reader.read();
+      } catch (e) {
+        this.end();
+        throw e;
+      }
+      const { value, done } = r;
       if (done) {
         this.eof = true;
+        this.end();
         return this.buffered >= n;
       }
       if (this.off > 0 || this.buf.length === 0) {
@@ -94,6 +111,7 @@ export class StreamReader {
 
   /** STOP_SENDING / cancel. */
   async cancel(reason?: unknown): Promise<void> {
+    this.end();
     await this.reader.cancel(reason).catch(() => {});
   }
 }

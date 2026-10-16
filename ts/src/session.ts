@@ -315,21 +315,56 @@ export class Session {
     }
   }
 
+  private openStreams = new Map<string, number>();
+
+  /**
+   * Diagnostics: incoming unidirectional streams that have not ended yet
+   * (FIN read, reset or cancelled), by what they carry: a track's name,
+   * "fetch", "padding", "control" or "untyped".
+   */
+  openIncomingStreams(): Record<string, number> {
+    return Object.fromEntries(this.openStreams);
+  }
+
+  private countStream(label: string, delta: number) {
+    const n = (this.openStreams.get(label) ?? 0) + delta;
+    if (n > 0) this.openStreams.set(label, n);
+    else this.openStreams.delete(label);
+  }
+
+  // Counts r as open under label until it ends; relabelling moves it.
+  private countOpen(r: StreamReader, label: string): (next: string) => void {
+    let current = label;
+    this.countStream(current, 1);
+    r.onEnd = () => this.countStream(current, -1);
+    return (next) => {
+      this.countStream(current, -1);
+      current = next;
+      this.countStream(current, 1);
+    };
+  }
+
   private async handleUniStream(stream: ReadableStream<Uint8Array>) {
     const r = new StreamReader(stream);
+    const relabel = this.countOpen(r, "untyped");
     let type: number;
     try {
       type = await r.varint();
     } catch {
       return; // reset before the type arrived
     }
-    if (type === StreamType.Setup) return this.readControl(r);
-    if (isSubgroupStreamType(type)) return this.handleSubgroup(r, type);
+    if (type === StreamType.Setup) {
+      relabel("control");
+      return this.readControl(r);
+    }
+    if (isSubgroupStreamType(type)) return this.handleSubgroup(r, type, relabel);
     if (type === StreamType.Padding) {
+      relabel("padding");
       while (!(await r.done())) await r.exact(1);
       return;
     }
     if (type === StreamType.Fetch) {
+      relabel("fetch");
       const f = this.fetches.get(await r.varint());
       if (f) f.deliver(r);
       else await r.cancel(streamError(ResetCode.Cancelled));
@@ -359,9 +394,11 @@ export class Session {
     }
   }
 
-  private async handleSubgroup(r: StreamReader, type: number) {
+  private async handleSubgroup(r: StreamReader, type: number, relabel: (label: string) => void) {
     const header = await readSubgroupHeader(r, type);
+    relabel(`alias ${header.trackAlias}`);
     const sub = await this.waitSubscription(header.trackAlias);
+    if (sub) relabel([...sub.track.namespace, sub.track.name].join("/"));
     if (!sub) {
       await r.cancel(streamError(ResetCode.Cancelled));
       return;
