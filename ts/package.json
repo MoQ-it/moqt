@@ -2,7 +2,7 @@
   "name": "@moq-it/moqt",
   "version": "0.1.0",
   "description": "Media over QUIC Transport (draft-ietf-moq-transport-22) for browsers, over WebTransport",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "files": [
     "dist"
