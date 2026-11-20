@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dunglas/httpsfv v1.1.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect

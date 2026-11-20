@@ -1,5 +1,5 @@
-// A MOQT session over the browser WebTransport API, mirroring the Go
-// moqt package.
+// A MOQT session over the browser WebTransport API, or a WebSocket where
+// that is missing or broken, mirroring the Go moqt package.
 
 import { EndOfStream, FetchDecoder, type FetchObject, readSubgroupHeader, StreamReader, SubgroupDecoder } from "./stream.ts";
 import {
@@ -40,6 +40,7 @@ import {
   validateNamespace,
   Writer,
 } from "./wire.ts";
+import { type BidiStream, type Transport, WebSocketTransport } from "./websocket.ts";
 
 export const Implementation = "moqt-ts/0.1 (draft-22)";
 
@@ -66,17 +67,33 @@ export interface Handler {
   onSubscribeNamespace?(req: SubscribeNamespaceRequest): void;
 }
 
+/** How a Session reaches the relay. */
+export type TransportKind = "webtransport" | "websocket";
+
 export interface ConnectOptions {
   /** https:// URL of the relay's WebTransport endpoint. */
   url: string;
-  /** SHA-256 hashes of a self-signed server certificate (development). */
+  /**
+   * "auto" (the default) uses WebTransport, falling back to a WebSocket
+   * when the browser lacks it or WebKit's is unreliable, or when it does
+   * not connect in time.
+   */
+  transport?: "auto" | TransportKind;
+  /** The relay's WebSocket URL; default: url with wss:// instead of https://. */
+  webSocketUrl?: string;
+  /** How long WebTransport gets before a WebSocket is tried too, in auto mode (default 1000ms). */
+  webSocketDelayMs?: number;
+  /**
+   * SHA-256 hashes of a self-signed server certificate (development).
+   * WebTransport only: a WebSocket needs a certificate the browser trusts.
+   */
   serverCertificateHashes?: Uint8Array[];
   /** Sent as the AUTHORIZATION TOKEN setup option (USE_VALUE). */
   authorizationToken?: Uint8Array;
   authorizationTokenType?: number;
   setupOptions?: KeyValue[];
   handler?: Handler;
-  /** How long the WebTransport handshake may take (default 10000ms). */
+  /** How long the transport handshake may take (default 10000ms). */
   readyTimeoutMs?: number;
   setupTimeoutMs?: number;
   /** How long a data stream with an unknown Track Alias waits (default 2000ms). */
@@ -121,14 +138,108 @@ function streamError(code: number): unknown {
   } catch {
     // fall through
   }
-  return new Error(`moqt stream error ${code}`);
+  return Object.assign(new Error(`moqt stream error ${code}`), { streamErrorCode: code });
+}
+
+/**
+ * Whether WebTransport can carry a long session. WebKit's stalls once its
+ * QUIC flow-control credit runs out (WebKit bug 319818); every iOS browser
+ * is WebKit.
+ */
+export function webTransportUsable(): boolean {
+  if (typeof WebTransport === "undefined") return false;
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  return !(/AppleWebKit\//.test(ua) && !/Chrome\/|Chromium\//.test(ua));
+}
+
+function webSocketUrl(opts: ConnectOptions): string {
+  if (opts.webSocketUrl) return opts.webSocketUrl;
+  const u = new URL(opts.url);
+  u.protocol = u.protocol === "http:" ? "ws:" : "wss:";
+  return u.toString();
+}
+
+function closeQuietly(t: Transport) {
+  try {
+    t.close();
+  } catch {
+    // already closed
+  }
+}
+
+function openWebTransport(opts: ConnectOptions): Transport {
+  const wtOpts: WebTransportOptions & { protocols?: string[] } = { protocols: [ALPN] };
+  if (opts.serverCertificateHashes) {
+    wtOpts.serverCertificateHashes = opts.serverCertificateHashes.map((value) => ({ algorithm: "sha-256", value: value as BufferSource }));
+  }
+  return new WebTransport(opts.url, wtOpts) as unknown as Transport;
+}
+
+/** @internal Opens the transport opts ask for, racing WebSocket against WebTransport in auto mode. */
+export async function openTransport(opts: ConnectOptions, ms: number): Promise<[Transport, TransportKind]> {
+  const mode = opts.transport ?? "auto";
+  if (mode === "webtransport" && typeof WebTransport === "undefined") throw new Error("this browser does not support WebTransport");
+  const tryWT = mode === "webtransport" || (mode === "auto" && webTransportUsable());
+  const tryWS = mode === "websocket" || (mode === "auto" && typeof WebSocket !== "undefined");
+  if (!tryWT && !tryWS) throw new Error("this browser does not support WebTransport");
+  const opened: Transport[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let delay: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<[Transport, TransportKind]>((resolve, reject) => {
+      const errors: string[] = [];
+      let pending = 0;
+      let wsStarted = false;
+      const attempt = (kind: TransportKind) => {
+        let t: Transport;
+        try {
+          t = kind === "webtransport" ? openWebTransport(opts) : new WebSocketTransport(webSocketUrl(opts));
+        } catch (e) {
+          return failed(kind, e);
+        }
+        opened.push(t);
+        pending++;
+        t.ready.then(
+          () => resolve([t, kind]),
+          (e) => {
+            pending--;
+            failed(kind, e);
+          },
+        );
+      };
+      const startWS = () => {
+        if (wsStarted || !tryWS) return;
+        wsStarted = true;
+        attempt("websocket");
+      };
+      const failed = (kind: TransportKind, e: unknown) => {
+        errors.push(`${kind}: ${e instanceof Error ? e.message : String(e)}`);
+        if (kind === "webtransport") startWS();
+        if (pending === 0 && (wsStarted || !tryWS)) reject(new Error(`could not connect to ${opts.url} (${errors.join("; ")})`));
+      };
+      timer = setTimeout(() => reject(new Error(`timed out opening a ${tryWT ? "WebTransport" : "WebSocket"} session to ${opts.url}`)), ms);
+      if (tryWT) {
+        attempt("webtransport");
+        if (tryWS) delay = setTimeout(startWS, opts.webSocketDelayMs ?? 1000);
+      } else startWS();
+    }).then(([t, kind]) => {
+      for (const o of opened) if (o !== t) closeQuietly(o);
+      return [t, kind] as [Transport, TransportKind];
+    });
+  } catch (e) {
+    for (const o of opened) closeQuietly(o);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(delay);
+  }
 }
 
 /** One bidirectional request stream. */
 class RequestStream {
   readonly reader: StreamReader;
   private writer: WritableStreamDefaultWriter<Uint8Array>;
-  constructor(readonly session: Session, stream: WebTransportBidirectionalStream) {
+  constructor(readonly session: Session, stream: BidiStream) {
     this.reader = new StreamReader(stream.readable);
     this.writer = stream.writable.getWriter();
   }
@@ -171,7 +282,10 @@ class RequestStream {
 }
 
 export class Session {
-  readonly wt: WebTransport;
+  /** The WebTransport session, or its WebSocket stand-in. */
+  readonly wt: Transport;
+  /** Which transport carries the session. */
+  readonly transport: TransportKind;
   readonly handler: Handler;
   peerSetup: KeyValue[] = [];
   /** Resolves with the peer's GOAWAY. */
@@ -195,8 +309,9 @@ export class Session {
   private datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
   private readonly aliasWaitMs: number;
 
-  private constructor(wt: WebTransport, opts: ConnectOptions) {
+  private constructor(wt: Transport, transport: TransportKind, opts: ConnectOptions) {
     this.wt = wt;
+    this.transport = transport;
     this.handler = opts.handler ?? {};
     this.aliasWaitMs = opts.aliasWaitMs ?? 2000;
     this.goaway = new Promise((r) => (this.resolveGoaway = r));
@@ -205,34 +320,13 @@ export class Session {
 
   /** Connects, exchanges SETUP and returns the established session. */
   static async connect(opts: ConnectOptions): Promise<Session> {
-    const wtOpts: WebTransportOptions & { protocols?: string[] } = { protocols: [ALPN] };
-    if (opts.serverCertificateHashes) {
-      wtOpts.serverCertificateHashes = opts.serverCertificateHashes.map((value) => ({ algorithm: "sha-256", value: value as BufferSource }));
-    }
-    if (typeof WebTransport === "undefined") throw new Error("this browser does not support WebTransport");
-    const wt = new WebTransport(opts.url, wtOpts);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`timed out opening a WebTransport session to ${opts.url}`)), opts.readyTimeoutMs ?? 10000);
-    });
-    try {
-      await Promise.race([wt.ready, expired]);
-    } catch (e) {
-      try {
-        wt.close();
-      } catch {
-        // already closed
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
+    const [wt, kind] = await openTransport(opts, opts.readyTimeoutMs ?? 10000);
     const negotiated = (wt as { protocol?: string }).protocol;
-    if (negotiated !== undefined && negotiated !== "" && negotiated !== ALPN) {
+    if (kind === "webtransport" && negotiated !== undefined && negotiated !== "" && negotiated !== ALPN) {
       wt.close({ closeCode: SessionErrorCode.ProtocolViolation, reason: "protocol" });
       throw new Error(`server negotiated ${negotiated}, not ${ALPN}`);
     }
-    const s = new Session(wt, opts);
+    const s = new Session(wt, kind, opts);
     await s.start(opts);
     return s;
   }
@@ -985,7 +1079,7 @@ export class OutgoingSubgroup {
   async writeObject(o: MoqObject): Promise<void> {
     const w = new Writer();
     if (!this.writer) {
-      const stream = await this.session.wt.createUnidirectionalStream({ sendOrder: this.track.sendOrder(this.priority) } as WebTransportSendStreamOptions);
+      const stream = await this.session.wt.createUnidirectionalStream({ sendOrder: this.track.sendOrder(this.priority) });
       this.writer = stream.getWriter();
       this.track.countStream();
       w.bytes(encodeSubgroupHeader(this.header));

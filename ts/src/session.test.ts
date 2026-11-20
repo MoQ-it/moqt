@@ -22,6 +22,7 @@ test("connect gives up on a stalled WebTransport handshake", async () => {
 
 test("connect explains a missing WebTransport", async () => {
   vi.stubGlobal("WebTransport", undefined);
+  vi.stubGlobal("WebSocket", undefined);
   await expect(Session.connect({ url: "https://relay.test/moq" })).rejects.toThrow("does not support WebTransport");
 });
 
